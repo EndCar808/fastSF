@@ -56,6 +56,6 @@ cd ..
 cd test_velocity_3D
 mpirun -np 1 ../../src/fastSF.out
 cd ../
-python test.py
+python3 test.py
 
 
