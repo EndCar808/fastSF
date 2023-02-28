@@ -41,11 +41,16 @@
  ********************************************************************************************************************************************
  */
 
+#include <stdio.h>
+#include <complex.h>
+#include <tgmath.h>
+#include <fftw3.h>
 #include "h5si.h"
 #include <yaml-cpp/yaml.h>
 #include <iostream>
 #include <fstream>
 #include <hdf5.h>
+#include <hdf5_hl.h>
 #include <sstream>
 #include <blitz/array.h>
 #include <omp.h>
@@ -106,6 +111,25 @@ void calculate_grid_spacing();
 void resize_input();
 void get_input_shape(string , string , string , Array<int,1>&);
 void help_command();
+
+// The original fastSF main function code
+void fastSFcode(int argc, char *argv[]);
+
+// My functions and definitions
+void readInputData(char* infile, char* dsetname, hid_t dtype);
+hid_t createComplexDataType(void);
+void initFFTWInversePlans(int Nx, int Ny, int sys_dim);
+
+// My global variables
+int SYS_2D = 2;
+int SYS_3D = 3;
+fftw_plan scalar_inv_dft_2d;
+fftw_plan vector_inv_dft_2d;
+fftw_complex* tmp_w_hat;
+fftw_complex* tmp_u_hat;
+double* w;
+double* u;
+
 
 /**
  ********************************************************************************************************************************************
@@ -475,6 +499,134 @@ int main(int argc, char *argv[]) {
     
     //Initiallizing h5si
     h5::init();
+
+    // Initialize Compoud dataype 
+    hid_t COMPLEX_DTYPE = createComplexDataType();
+
+    // Initialize memory
+    int Ny = 64;
+    int Nx = Ny;
+    int Nxf = Nx/2 + 1;
+    tmp_w_hat = new fftw_complex[Ny * Nxf];
+    tmp_u_hat = new fftw_complex[Ny * Nxf * SYS_2D];
+    w = new double[Ny * Nx];
+    u = new double[Ny * Nx * SYS_2D];
+
+    initFFTWInversePlans(Ny, Nx, SYS_2D);
+
+    // Get input file name and group name
+    char Infilename[512];
+    sprintf(Infilename, "%s", "test/MyTestData/Main_HDF_Data.h5");
+    char groupName[512]; 
+
+    for (int snap = 0; snap < 100; ++snap)  {
+        printf("Snap = %d\n", snap);
+        sprintf(groupName, "Iter_%05d/w_hat", snap);
+        readInputData(Infilename, groupName, COMPLEX_DTYPE);
+    }
+
+    H5Tclose(COMPLEX_DTYPE);
+
+    // Run the fastSF original code
+    // fastSFcode(argc, argv);
+
+
+    h5::finalize();
+    MPI_Finalize();
+    return 0;
+}
+
+
+hid_t createComplexDataType(void) {
+
+    hid_t dtype;
+
+    // Struct definition for complex compound data type
+    struct complex_type_tmp {
+        double re;               // real part 
+        double im;               // imaginary part 
+    };
+
+    // Create complex struct
+    struct complex_type_tmp cmplex;
+    cmplex.re = 0.0;
+    cmplex.im = 0.0;
+
+    // // create complex compound datatype
+    dtype = H5Tcreate(H5T_COMPOUND, sizeof(cmplex));
+
+    // // Insert the real part of the datatype
+    H5Tinsert(dtype, "r", offsetof(complex_type_tmp,re), H5T_NATIVE_DOUBLE);
+
+    // // Insert the imaginary part of the datatype
+    H5Tinsert(dtype, "i", offsetof(complex_type_tmp,im), H5T_NATIVE_DOUBLE);
+
+    return dtype;
+}
+
+void initFFTWInversePlans(int Nx, int Ny, int sys_dim) {
+
+    const int N_batch[sys_dim] = {Ny, Nx};
+
+    // Create inverse scalar plan
+    scalar_inv_dft_2d = fftw_plan_dft_c2r_2d(Ny, Nx, tmp_w_hat, w, FFTW_MEASURE);   
+
+    // Create inverse vector (batch) plan
+    vector_inv_dft_2d = fftw_plan_many_dft_c2r(sys_dim, N_batch, sys_dim, tmp_u_hat, NULL, sys_dim, 1, u, NULL, sys_dim, 1, FFTW_MEASURE);
+}
+
+/**
+******************************************************************************************************************************
+*\brief  My read input file code - Reads data from hdf5 file, transforms to real space and stores real space data in array
+*        to be passed to the fastSF code
+*
+******************************************************************************************************************************
+*/
+void readInputData(char* infile, char* dsetname, hid_t dtype) {
+
+    // Open input file to read in the data
+    hid_t file_id = H5Fopen(infile, H5F_ACC_RDONLY, H5P_DEFAULT);
+
+    // Get the dimensions of the dataset
+    hsize_t dims[2];
+    H5LTget_dataset_info(file_id, dsetname, dims, NULL, NULL);
+    int Ny  = dims[0];
+    int Nxf = dims[1];
+    int Nx  = 2 * (dims[1] - 1);
+
+    // Read in the data
+    H5LTread_dataset(file_id, dsetname, dtype, tmp_w_hat);
+
+    // Execute inverse transform to real space
+    fftw_execute_dft_c2r(scalar_inv_dft_2d, tmp_w_hat, w);
+    
+    // Write the real space data to the fastSF array
+    T_2D.resize(Ny, Nx);
+    for (int i = 0; i < Ny; ++i) {
+        for (int j = 0; j < Nx; ++j) {
+          T_2D(i, j) = w[i * Nx + j];
+        }
+    }
+
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 5; ++j) {
+          printf("%lf\n", T_2D(i, j));
+        }
+        printf("\n");
+    }
+
+    // Close file 
+    H5Fclose(file_id);
+}
+
+/**
+******************************************************************************************************************************
+*\brief  The original fastSF main function code
+*
+******************************************************************************************************************************
+*/
+void fastSFcode(int argc, char *argv[]) {
+
     timeval start_pt, end_pt, start_t, end_t;
 
     //Record the time of starting of the program
@@ -483,85 +635,80 @@ int main(int argc, char *argv[]) {
     double elapsedt=0.0;
     double elapsepdt=0.0;
     
-    //Get the input parameters
-    get_Inputs(argc, argv);
-    
-    
-    
-  	
 
+   //Get the input parameters
+   get_Inputs(argc, argv);
+   
+   //Resizing the input fields
+   Read_fields();
 
-
-    //Resizing the input fields
-    Read_fields();
-
-    if (rank_mpi==0) {
-    	cout<<"\nNumber of processors in x direction: "<<px<<endl;
-    	if (two_dimension_switch) {
-        	cout<<"Number of processors in z direction: "<<P/px<<endl;
-    	}
-    	else {
-        	cout<<"Number of processors in y direction: "<<P/px<<endl;
-    	}
-  	}  
-
- 	if (px > P) {
-        if (rank_mpi==0) {
-            cout<<"ERROR! Number of processors in x direction has to be less than or equal to the total number of processors! Aborting.."<<endl;
-        }
-        h5::finalize();
-        MPI_Finalize();
-        exit(1);
-    }
-    if (Nx/2%px != 0) {
-        if (rank_mpi==0){
-            cout<<"ERROR! Number of processors in x direction should be less or equal to Nx/2 and some power of 2\n Aborting...\n";
-        }
-        h5::finalize();
-        MPI_Finalize();
-        exit(1);
-    }
-
-    int N2;
-
+   if (rank_mpi==0) {
+    cout<<"\nNumber of processors in x direction: "<<px<<endl;
     if (two_dimension_switch) {
-        N2 = Nz;
+        cout<<"Number of processors in z direction: "<<P/px<<endl;
     }
     else {
-        N2 = Ny;
+        cout<<"Number of processors in y direction: "<<P/px<<endl;
     }
+    }  
 
-    if (N2/2%(P/px) != 0) {
-        if (rank_mpi==0){
-            cout<<"ERROR! Number of processors in y (or z) direction should be less or equal to Ny/2 (or Nz/2) and some power of 2\n Aborting...\n";
-        }
-        h5::finalize();
-        MPI_Finalize();
-        exit(1);
-    } 
+    if (px > P) {
+       if (rank_mpi==0) {
+           cout<<"ERROR! Number of processors in x direction has to be less than or equal to the total number of processors! Aborting.."<<endl;
+       }
+       h5::finalize();
+       MPI_Finalize();
+       exit(1);
+   }
+   if (Nx/2%px != 0) {
+       if (rank_mpi==0){
+           cout<<"ERROR! Number of processors in x direction should be less or equal to Nx/2 and some power of 2\n Aborting...\n";
+       }
+       h5::finalize();
+       MPI_Finalize();
+       exit(1);
+   }
+
+   int N2;
+
+   if (two_dimension_switch) {
+       N2 = Nz;
+   }
+   else {
+       N2 = Ny;
+   }
+
+   if (N2/2%(P/px) != 0) {
+       if (rank_mpi==0){
+           cout<<"ERROR! Number of processors in y (or z) direction should be less or equal to Ny/2 (or Nz/2) and some power of 2\n Aborting...\n";
+       }
+       h5::finalize();
+       MPI_Finalize();
+       exit(1);
+   } 
 
 
-    //Resize the structure function array according to the type of inputs
-    resize_SFs();
+   //Resize the structure function array according to the type of inputs
+   resize_SFs();
 
-    
-    //Record the time of starting the parallel processing
-    gettimeofday(&start_pt,NULL);
+   
+   //Record the time of starting the parallel processing
+   gettimeofday(&start_pt,NULL);
 
-    //Calculating the structure functions
-    calc_SFs();
+   //Calculating the structure functions
+   calc_SFs();
 
 
-    //Record the time of ending of parallel processing
-    gettimeofday(&end_pt,NULL);
-    
- 
-    //Write the SF array to disk
-    write_SFs();
+   //Record the time of ending of parallel processing
+   gettimeofday(&end_pt,NULL);
+   
 
-    if (test_switch){
-        test_cases();
-    }
+   //Write the SF array to disk
+   write_SFs();
+
+   if (test_switch){
+       test_cases();
+   }
 
     //Record the time when the program ends
     gettimeofday(&end_t,NULL);
@@ -575,10 +722,6 @@ int main(int argc, char *argv[]) {
         cout<<"\nTotal time elapsed: "<<elapsedt<<endl;
         cout<<"\nProgram ends."<<endl;
    }
-
-    h5::finalize();
-    MPI_Finalize();
-    return 0;
 }
 
 /**

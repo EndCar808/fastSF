@@ -130,15 +130,15 @@ def plotSF_r_2D():
 	ulim = 25
 	fig, axes = plt.subplots(figsize = (3.5, 2.57))
 	
-	axes.plot(r[1:len(r)], SF2_r[1:len(r)], color='red', lw=1.5, label=r"$S_2^{u}(l)$") #
-	axes.plot(r[1:len(r)], SF3_r[1:len(r)], color='green', lw=1.5, label=r"$S_3^{u}(l)$")
+	axes.plot(r, SF2_r, color='red', lw=1.5, label=r"$S_2^{u}(l)$") #
+	axes.plot(r, SF3_r, color='green', lw=1.5, label=r"$S_3^{u}(l)$")
 	
 	
 	s2 = r*r
 	s3 = r*r*r
 	
-	axes.plot(r[llim:ulim], s2[llim:ulim], color='black', lw=1.5, linestyle= 'dashed')#, label=r"$S_q^{u}(l)$") #
-	axes.plot(r[llim:ulim], s3[llim:ulim], color='black', lw=1.5, linestyle= 'dashed')#, label=r"$S_q^{u}(l)$")
+	axes.plot(r, s2, color='black', lw=1.5, linestyle= 'dashed')#, label=r"$S_q^{u}(l)$") #
+	axes.plot(r, s3, color='black', lw=1.5, linestyle= 'dashed')#, label=r"$S_q^{u}(l)$")
 	
 	axes.text(0.4, 0.2, "$l^2$")
 	axes.text(0.4, 0.035, "$l^3$")
@@ -147,10 +147,10 @@ def plotSF_r_2D():
 	axes.set_ylabel('$S_q^{u}(l)$')
 	axes.set_xscale('log')
 	axes.set_yscale('log')
-	axes.set_xlim(0.1, 0.7)
-	axes.set_ylim(2e-3, 1)
-	axes.set_xticks([0.1, 0.4, 0.7])
-	axes.set_xticklabels([0.1, 0.4, 0.7])
+	# axes.set_xlim(0.1, 0.7)
+	# axes.set_ylim(2e-3, 1)
+	# axes.set_xticks([0.1, 0.4, 0.7])
+	# axes.set_xticklabels([0.1, 0.4, 0.7])
 	axes.legend(scatterpoints=1, loc='lower right', prop={'size':0.95*A}, ncol = 1, frameon=False)
 	fig.tight_layout()
 	plt.savefig("SF_velocity_r2D.png", dpi=600)
@@ -222,6 +222,7 @@ def plot_SF2D_scalar():
     #SF3 = (hdf5_reader_plane("test_scalar_2D/out/SF_Grid_scalar3.h5", "SF_Grid_scalar3"))
     
     Nlx, Nlz = SF2.shape
+    print(SF2.shape)
     
     lx = np.linspace(0,0.5,Nlx)
     lz = np.linspace(0,0.5,Nlz)
@@ -422,8 +423,8 @@ def plot_SF3D_velocity():
 
 plotSF_r_2D()
 plot_SF2D_scalar()
-#plot_SF2D_velocity()
+# plot_SF2D_velocity()
 
 plotSF_r_3D()
 plot_SF3D_scalar()
-#plot_SF3D_velocity()
+# plot_SF3D_velocity()
