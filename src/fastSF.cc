@@ -116,10 +116,12 @@ void help_command();
 void fastSFcode(int argc, char *argv[]);
 
 // My functions and definitions
-void readInputData(char* infile, char* dsetname, hid_t dtype);
+void readInputData(int snap, char* infile, hid_t dtype);
 hid_t createComplexDataType(void);
 void initFFTWInversePlans(int Nx, int Ny, int sys_dim);
-
+void computeStructureFunctions(int argc, char *argv[]);
+void writeSFToFile(int snap);
+void write_3D_SF(Array<double,3> A, char* out_dir, string file_name, int snap);
 // My global variables
 int SYS_2D = 2;
 int SYS_3D = 3;
@@ -129,7 +131,11 @@ fftw_complex* tmp_w_hat;
 fftw_complex* tmp_u_hat;
 double* w;
 double* u;
-
+char Infilename[512];
+char data_dir[512];
+Array<double,3> vort_sf_t_avg;
+Array<double,3> vel_long_sf_t_avg;
+Array<double,3> vel_trans_sf_t_avg;
 
 /**
  ********************************************************************************************************************************************
@@ -500,32 +506,8 @@ int main(int argc, char *argv[]) {
     //Initiallizing h5si
     h5::init();
 
-    // Initialize Compoud dataype 
-    hid_t COMPLEX_DTYPE = createComplexDataType();
-
-    // Initialize memory
-    int Ny = 64;
-    int Nx = Ny;
-    int Nxf = Nx/2 + 1;
-    tmp_w_hat = new fftw_complex[Ny * Nxf];
-    tmp_u_hat = new fftw_complex[Ny * Nxf * SYS_2D];
-    w = new double[Ny * Nx];
-    u = new double[Ny * Nx * SYS_2D];
-
-    initFFTWInversePlans(Ny, Nx, SYS_2D);
-
-    // Get input file name and group name
-    char Infilename[512];
-    sprintf(Infilename, "%s", "test/MyTestData/Main_HDF_Data.h5");
-    char groupName[512]; 
-
-    for (int snap = 0; snap < 100; ++snap)  {
-        printf("Snap = %d\n", snap);
-        sprintf(groupName, "Iter_%05d/w_hat", snap);
-        readInputData(Infilename, groupName, COMPLEX_DTYPE);
-    }
-
-    H5Tclose(COMPLEX_DTYPE);
+    // Compute structure functions
+    computeStructureFunctions(argc, argv); 
 
     // Run the fastSF original code
     // fastSFcode(argc, argv);
@@ -536,6 +518,122 @@ int main(int argc, char *argv[]) {
     return 0;
 }
 
+void computeStructureFunctions(int argc, char *argv[]) {
+
+    //Get the input parameters
+    get_Inputs(argc, argv);
+
+    //Resize the structure function array according to the type of inputs
+    resize_SFs();
+
+    // Initialize Compoud dataype 
+    hid_t COMPLEX_DTYPE = createComplexDataType();
+
+    // Allocate the memory needed to rread in data and perform transforms
+    int Nzf = Nz/2 + 1;
+    tmp_w_hat = new fftw_complex[Nx * Nzf];
+    tmp_u_hat = new fftw_complex[Nx * Nzf * SYS_2D];
+    w = new double[Nx * Nz];
+    u = new double[Nx * Nz * SYS_2D];
+
+    // Initialize the FFTW plans
+    initFFTWInversePlans(Nx, Nz, SYS_2D);
+
+    // Allocate memory for the running time average of the structure function field
+    vort_sf_t_avg.resize(Nx/2, Nz/2, q2-q1 + 1);
+    vort_sf_t_avg = 0.0;
+
+    ///////////////////////
+    /// Loop through Data
+    /// ///////////////////
+    int indx = 0;
+    int save_snap = 10;
+    int num_snaps = 100;
+    for (int snap = 0; snap < num_snaps; ++snap)  {
+        // Print snapshot update to screen
+        if (!rank_mpi) {
+            printf("Snap = %d\n", snap);
+        }
+
+        // Read in this snapshot
+        readInputData(snap, Infilename, COMPLEX_DTYPE);
+
+        // Compute structure functions for this iteration
+        SF_scalar_2D(T_2D);
+        vort_sf_t_avg(Range::all(), Range::all(), Range::all()) += SF_Grid2D_scalar(Range::all() ,Range::all() ,Range::all());
+
+        // Write running time averaged vorticity structure function to file
+        if (snap % save_snap == 0) {
+            writeSFToFile(snap);
+            indx++;
+        }
+    }
+    ///////////////////////
+    /// End of Loop
+    /// ///////////////////
+ 
+    // Final Write 
+    writeSFToFile(num_snaps);
+    
+    // Close complex datatype id
+    H5Tclose(COMPLEX_DTYPE);
+}
+
+void writeSFToFile(int snap) {
+
+    if (rank_mpi==0){
+        // Make output dir
+        char outfile[1024];
+        sprintf(outfile, "%s/StructureFunctions", data_dir);
+        mkdir(outfile, 0777);
+        
+        if (two_dimension_switch) {
+            
+            if (scalar_switch){
+                write_3D_SF(vort_sf_t_avg, outfile, SF_Grid_scalar_name, snap);
+            }
+        }
+    }
+}
+
+void write_3D_SF(Array<double,3> A, char* out_dir, string file_name, int snap) {
+  
+  int nx=A(Range::all(),0,0).size();
+  int nz=A(0,Range::all(),0).size();
+
+  stringstream string_stream;
+  string filepath;
+
+  // Create filepath
+  char file_path[512];
+  sprintf(file_path, "%s/", out_dir);
+
+  // Convert to string
+  string_stream << file_path;
+  string_stream >> filepath;
+  h5::File f(filepath+file_name+int_to_str(snap)+".h5", "w");
+  
+  int q = q1;
+  
+  Array<double,2> temp(nx,nz);
+  
+  // Write structure functions to file
+  while(q<=q2) {
+      cout<<"Writing "<<q<<" order to file.\n";
+      string qstr = int_to_str(q);
+      h5::Dataset ds = f.create_dataset(file_name+qstr, h5::shape(nx,nz), "double");
+      temp(Range::all(),Range::all())=A(Range::all(),Range::all(),q-q1);
+      ds << temp.data();
+      q++;
+  }
+}
+
+/**
+******************************************************************************************************************************
+*\brief  Initializes compound datatype to read in complex data from hdf5 file
+*
+******************************************************************************************************************************
+*/
 
 hid_t createComplexDataType(void) {
 
@@ -564,6 +662,13 @@ hid_t createComplexDataType(void) {
     return dtype;
 }
 
+/**
+******************************************************************************************************************************
+*\brief  Initializes FFTW plans to perform inverse (to real space) transforms on my simulation data
+*
+******************************************************************************************************************************
+*/
+
 void initFFTWInversePlans(int Nx, int Ny, int sys_dim) {
 
     const int N_batch[sys_dim] = {Ny, Nx};
@@ -582,17 +687,18 @@ void initFFTWInversePlans(int Nx, int Ny, int sys_dim) {
 *
 ******************************************************************************************************************************
 */
-void readInputData(char* infile, char* dsetname, hid_t dtype) {
+void readInputData(int snap, char* infile, hid_t dtype) {
 
     // Open input file to read in the data
     hid_t file_id = H5Fopen(infile, H5F_ACC_RDONLY, H5P_DEFAULT);
 
+    // Get groupname for this snap shot
+    char dsetname[512]; 
+    sprintf(dsetname, "Iter_%05d/w_hat", snap);
+
     // Get the dimensions of the dataset
     hsize_t dims[2];
     H5LTget_dataset_info(file_id, dsetname, dims, NULL, NULL);
-    int Ny  = dims[0];
-    int Nxf = dims[1];
-    int Nx  = 2 * (dims[1] - 1);
 
     // Read in the data
     H5LTread_dataset(file_id, dsetname, dtype, tmp_w_hat);
@@ -600,19 +706,12 @@ void readInputData(char* infile, char* dsetname, hid_t dtype) {
     // Execute inverse transform to real space
     fftw_execute_dft_c2r(scalar_inv_dft_2d, tmp_w_hat, w);
     
-    // Write the real space data to the fastSF array
-    T_2D.resize(Ny, Nx);
-    for (int i = 0; i < Ny; ++i) {
-        for (int j = 0; j < Nx; ++j) {
-          T_2D(i, j) = w[i * Nx + j];
+    // Write the real space data to the fastSF array - have to transpose it to be in same configuration as fastSF
+    T_2D.resize(Nx, Nz);
+    for (int i = 0; i < Nx; ++i) {
+        for (int j = 0; j < Nz; ++j) {
+          T_2D(i, j) = w[j * Nx + i];
         }
-    }
-
-    for (int i = 0; i < 3; ++i) {
-        for (int j = 0; j < 5; ++j) {
-          printf("%lf\n", T_2D(i, j));
-        }
-        printf("\n");
     }
 
     // Close file 
@@ -1802,7 +1901,8 @@ void get_Inputs(int argc, char* argv[]) {
     
   
     int option;
-    while ((option=getopt(argc, argv, "X:Y:Z:1:2:x:y:z:l:d:p:t:s:U:V:W:Q:P:L:M:h:u:v:w:q:"))!=-1){
+    while ((option=getopt(argc, argv, "X:Y:Z:1:2:x:y:z:l:d:p:t:s:U:V:W:Q:P:L:M:h:u:v:w:q:I:D:"))!=-1){
+            // printf("Option: %d\t Arg: %s\n", option, optarg);
     	switch(option){
     		case 'h':
     			help_command();
@@ -1879,6 +1979,12 @@ void get_Inputs(int argc, char* argv[]) {
                 break;
             case 'M':
                 SF_Grid_scalar_name = optarg;
+                break;
+            case 'I':
+                strncpy(Infilename, optarg, 512);
+                break;
+            case 'D':
+                strncpy(data_dir, optarg, 512);
                 break;
             default:
                 if (rank_mpi==0){
@@ -2421,7 +2527,6 @@ void SF_scalar_2D(Array<double,2> T)
     Array<int, 3> index_list;
     compute_index_list(index_list, Nx, Nz);
     Array<double,2> dT;
-    
     for (int ix=0; ix<p_per_proc; ix++){
         int x=index_list(ix, 0, rank_mpi);
         int z=index_list(ix, 1, rank_mpi);
