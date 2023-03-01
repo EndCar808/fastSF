@@ -42,9 +42,9 @@
  */
 
 #include <stdio.h>
+#include <fftw3.h>
 #include <complex.h>
 #include <tgmath.h>
-#include <fftw3.h>
 #include "h5si.h"
 #include <yaml-cpp/yaml.h>
 #include <iostream>
@@ -122,20 +122,24 @@ void initFFTWInversePlans(int Nx, int Ny, int sys_dim);
 void computeStructureFunctions(int argc, char *argv[]);
 void writeSFToFile(int snap);
 void write_3D_SF(Array<double,3> A, char* out_dir, string file_name, int snap);
+int getNumSnaps(char* infile);
+void resizeSFTimeAvgArrays(void);
+void computeSFs(void);
 // My global variables
 int SYS_2D = 2;
 int SYS_3D = 3;
 fftw_plan scalar_inv_dft_2d;
 fftw_plan vector_inv_dft_2d;
-fftw_complex* tmp_w_hat;
-fftw_complex* tmp_u_hat;
+complex<double>* tmp_w_hat;
+complex<double>* tmp_u_hat;
+int checkpoint;
 double* w;
 double* u;
 char Infilename[512];
 char data_dir[512];
-Array<double,3> vort_sf_t_avg;
-Array<double,3> vel_long_sf_t_avg;
-Array<double,3> vel_trans_sf_t_avg;
+Array<double,3> vort_2d_sf_t_avg;
+Array<double,3> vel_2d_long_sf_t_avg;
+Array<double,3> vel_2d_trans_sf_t_avg;
 
 /**
  ********************************************************************************************************************************************
@@ -523,32 +527,33 @@ void computeStructureFunctions(int argc, char *argv[]) {
     //Get the input parameters
     get_Inputs(argc, argv);
 
-    //Resize the structure function array according to the type of inputs
+    //Resize the structure function arrays according to the type of inputs
     resize_SFs();
+    resizeSFTimeAvgArrays();
 
     // Initialize Compoud dataype 
     hid_t COMPLEX_DTYPE = createComplexDataType();
 
     // Allocate the memory needed to rread in data and perform transforms
     int Nzf = Nz/2 + 1;
-    tmp_w_hat = new fftw_complex[Nx * Nzf];
-    tmp_u_hat = new fftw_complex[Nx * Nzf * SYS_2D];
-    w = new double[Nx * Nz];
-    u = new double[Nx * Nz * SYS_2D];
+    if (scalar_switch) {
+        tmp_w_hat = new complex<double>[Nx * Nzf];
+        w = new double[Nx * Nz];
+    }
+    else {
+        tmp_u_hat = new complex<double>[Nx * Nzf * SYS_2D];
+        u = new double[Nx * Nz * SYS_2D];
+    }
 
     // Initialize the FFTW plans
     initFFTWInversePlans(Nx, Nz, SYS_2D);
-
-    // Allocate memory for the running time average of the structure function field
-    vort_sf_t_avg.resize(Nx/2, Nz/2, q2-q1 + 1);
-    vort_sf_t_avg = 0.0;
 
     ///////////////////////
     /// Loop through Data
     /// ///////////////////
     int indx = 0;
-    int save_snap = 10;
-    int num_snaps = 100;
+    int save_snap = checkpoint;
+    int num_snaps = getNumSnaps(Infilename);
     for (int snap = 0; snap < num_snaps; ++snap)  {
         // Print snapshot update to screen
         if (!rank_mpi) {
@@ -559,8 +564,7 @@ void computeStructureFunctions(int argc, char *argv[]) {
         readInputData(snap, Infilename, COMPLEX_DTYPE);
 
         // Compute structure functions for this iteration
-        SF_scalar_2D(T_2D);
-        vort_sf_t_avg(Range::all(), Range::all(), Range::all()) += SF_Grid2D_scalar(Range::all() ,Range::all() ,Range::all());
+        computeSFs();
 
         // Write running time averaged vorticity structure function to file
         if (snap % save_snap == 0) {
@@ -577,8 +581,88 @@ void computeStructureFunctions(int argc, char *argv[]) {
     
     // Close complex datatype id
     H5Tclose(COMPLEX_DTYPE);
+
+    // Destroy fftw plans
+    if (scalar_switch) {
+        fftw_destroy_plan(scalar_inv_dft_2d);
+    } 
+    else {
+        fftw_destroy_plan(vector_inv_dft_2d);
+    }
+
+    // Cleanup FFTW
+    fftw_cleanup();
+
+    // Free memory
+    if (scalar_switch) {
+        delete tmp_w_hat;
+        delete w;
+    }
+    else {
+        delete tmp_u_hat;
+        delete u;
+    }
 }
 
+/**
+******************************************************************************************************************************
+*\brief  Wrapper function to call the appropriate fastSF function and update the runnning sf arrays
+*
+******************************************************************************************************************************
+*/
+void computeSFs(void) {
+
+    if (two_dimension_switch) {
+        if (scalar_switch) {
+            SF_scalar_2D(T_2D);
+            vort_2d_sf_t_avg(Range::all(), Range::all(), Range::all()) += SF_Grid2D_scalar(Range::all() ,Range::all() ,Range::all());
+        }
+        else {
+            if (longitudinal) {
+                SFunc_long_2D(V1_2D, V3_2D);
+                vel_2d_long_sf_t_avg(Range::all(), Range::all(), Range::all()) += SF_Grid2D_pll(Range::all() ,Range::all() ,Range::all());
+            } 
+            else {
+                SFunc2D(V1_2D, V3_2D);
+                vel_2d_long_sf_t_avg(Range::all(), Range::all(), Range::all()) += SF_Grid2D_pll(Range::all() ,Range::all() ,Range::all());
+                vel_2d_trans_sf_t_avg(Range::all(), Range::all(), Range::all()) += SF_Grid2D_perp(Range::all() ,Range::all() ,Range::all());
+            }
+        }
+    }
+}
+
+/**
+******************************************************************************************************************************
+*\brief  Resizes the arrays containing the running (time) average structure functions 
+*
+******************************************************************************************************************************
+*/
+void resizeSFTimeAvgArrays(void) {
+
+    if (rank_mpi==0) {
+        if (two_dimension_switch) {
+            if (scalar_switch) {
+                vort_2d_sf_t_avg.resize(Nx/2, Nz/2, q2-q1+1);
+                vort_2d_sf_t_avg = 0; 
+            }
+            else {
+                vel_2d_long_sf_t_avg.resize(Nx/2, Nz/2, q2-q1+1);
+                vel_2d_long_sf_t_avg = 0; 
+                if (!longitudinal) {
+                    vel_2d_trans_sf_t_avg.resize(Nx/2, Nz/2, q2-q1+1);
+                    vel_2d_trans_sf_t_avg = 0;
+                }
+            }
+        }
+    }
+}
+
+/**
+******************************************************************************************************************************
+*\brief  Wrapper function that writes the calls the appropriate functions to write str func data to file
+*
+******************************************************************************************************************************
+*/
 void writeSFToFile(int snap) {
 
     if (rank_mpi==0){
@@ -587,15 +671,27 @@ void writeSFToFile(int snap) {
         sprintf(outfile, "%s/StructureFunctions", data_dir);
         mkdir(outfile, 0777);
         
-        if (two_dimension_switch) {
-            
+        if (two_dimension_switch) {            
             if (scalar_switch){
-                write_3D_SF(vort_sf_t_avg, outfile, SF_Grid_scalar_name, snap);
+                write_3D_SF(vort_2d_sf_t_avg, outfile, SF_Grid_scalar_name, snap);
             }
+            else {
+                write_3D_SF(vel_2d_long_sf_t_avg, outfile, SF_Grid_pll_name, snap);    
+                if (not longitudinal) {
+                    write_3D_SF(vel_2d_trans_sf_t_avg, outfile, SF_Grid_perp_name, snap);
+                }
+            }
+            cout<<"\nWriting completed\n";
         }
     }
 }
 
+/**
+******************************************************************************************************************************
+*\brief  Writes arrays for the 2d dimensional structure functions to output file
+*
+******************************************************************************************************************************
+*/
 void write_3D_SF(Array<double,3> A, char* out_dir, string file_name, int snap) {
   
   int nx=A(Range::all(),0,0).size();
@@ -612,7 +708,7 @@ void write_3D_SF(Array<double,3> A, char* out_dir, string file_name, int snap) {
   string_stream << file_path;
   string_stream >> filepath;
   h5::File f(filepath+file_name+int_to_str(snap)+".h5", "w");
-  
+  cout << "Filename: " << filepath+file_name+int_to_str(snap)+".h5" << "\n";
   int q = q1;
   
   Array<double,2> temp(nx,nz);
@@ -671,15 +767,47 @@ hid_t createComplexDataType(void) {
 
 void initFFTWInversePlans(int Nx, int Ny, int sys_dim) {
 
-    const int N_batch[sys_dim] = {Ny, Nx};
-
-    // Create inverse scalar plan
-    scalar_inv_dft_2d = fftw_plan_dft_c2r_2d(Ny, Nx, tmp_w_hat, w, FFTW_MEASURE);   
-
-    // Create inverse vector (batch) plan
-    vector_inv_dft_2d = fftw_plan_many_dft_c2r(sys_dim, N_batch, sys_dim, tmp_u_hat, NULL, sys_dim, 1, u, NULL, sys_dim, 1, FFTW_MEASURE);
+    if (scalar_switch) {
+        // Create inverse scalar plan
+        scalar_inv_dft_2d = fftw_plan_dft_c2r_2d(Ny, Nx, reinterpret_cast<fftw_complex*>(tmp_w_hat), w, FFTW_MEASURE);  
+    } 
+    else {
+        // Create inverse vector (batch) plan
+        const int N_batch[sys_dim] = {Ny, Nx};
+        vector_inv_dft_2d = fftw_plan_many_dft_c2r(sys_dim, N_batch, sys_dim, reinterpret_cast<fftw_complex*>(tmp_u_hat), NULL, sys_dim, 1, u, NULL, sys_dim, 1, FFTW_MEASURE);
+    }
 }
+/**
+******************************************************************************************************************************
+*\brief  Opens input file and counts how many snapshots there are
+*
+******************************************************************************************************************************
+*/
+int getNumSnaps(char* infile) {
 
+    char group_string[64];
+    int num_snaps = 0;
+
+    // Open input file to read in the data
+    hid_t file_id = H5Fopen(infile, H5F_ACC_RDONLY, H5P_DEFAULT);
+
+    printf("Checking Number of Snapshots ");
+    for(int i = 0; i < (int) 1e6; ++i) {
+        // Check for snap
+        sprintf(group_string, "/Iter_%05d", i); 
+        if(H5Lexists(file_id, group_string, H5P_DEFAULT) > 0 ) {
+            num_snaps++;
+        }
+    }
+
+    // Print total number of snaps to screen
+    printf("\nTotal Snapshots: %d\n\n", num_snaps);
+
+    // Close file 
+    H5Fclose(file_id);
+
+    return num_snaps;
+}
 /**
 ******************************************************************************************************************************
 *\brief  My read input file code - Reads data from hdf5 file, transforms to real space and stores real space data in array
@@ -703,14 +831,55 @@ void readInputData(int snap, char* infile, hid_t dtype) {
     // Read in the data
     H5LTread_dataset(file_id, dsetname, dtype, tmp_w_hat);
 
-    // Execute inverse transform to real space
-    fftw_execute_dft_c2r(scalar_inv_dft_2d, tmp_w_hat, w);
-    
-    // Write the real space data to the fastSF array - have to transpose it to be in same configuration as fastSF
-    T_2D.resize(Nx, Nz);
-    for (int i = 0; i < Nx; ++i) {
-        for (int j = 0; j < Nz; ++j) {
-          T_2D(i, j) = w[j * Nx + i];
+    if (scalar_switch) {
+        // Execute inverse transform to real space
+        fftw_execute_dft_c2r(scalar_inv_dft_2d, reinterpret_cast<fftw_complex*>(tmp_w_hat), w);
+        
+        // Write the real space data to the fastSF array - have to transpose it to be in same configuration as fastSF
+        T_2D.resize(Nx, Nz);
+        for (int i = 0; i < Nx; ++i) {
+            for (int j = 0; j < Nz; ++j) {
+              T_2D(i, j) = w[j * Nx + i];
+            }
+        }
+    }
+    else {
+        // Get the velocity from the vorticity in Fourier space
+        int Nzf = Nx/2 + 1;
+        complex<double> kx, kz;
+        complex<double> k_sqr;
+        complex<double> I(0.0, 1.0);
+        for (int i = 0; i < Nx; ++i) {
+            for (int j = 0; j < Nzf; ++j) {
+                if (i <= Nx / 2) {
+                    kx = (double)i + 0.0 * I;
+                }
+                else {
+                    kx = (double)-Nx + i + 0.0 * I;
+                }
+                kz = (double)j + 0.0 * I;
+
+                if (real(kx) == 0.0 && real(kz) == 0.0) {
+                    tmp_u_hat[SYS_2D * (i * Nzf + j) + 0] = 0.0 + 0.0 * I;
+                    tmp_u_hat[SYS_2D * (i * Nzf + j) + 1] = 0.0 + 0.0 * I;
+                } 
+                else {
+                    k_sqr = (kx * kx + kz * kz);
+                    tmp_u_hat[SYS_2D * (i * Nzf + j) + 0] = I * (1.0 / k_sqr) * (kz * tmp_w_hat[i * Nzf + j]);
+                    tmp_u_hat[SYS_2D * (i * Nzf + j) + 1] = I * (-1.0 / k_sqr) * (kx * tmp_w_hat[i * Nzf + j]);  
+                }
+            }
+        }
+
+        // Execute inverse transform to real space
+        fftw_execute_dft_c2r(vector_inv_dft_2d, reinterpret_cast<fftw_complex*>(tmp_u_hat), u);
+
+        // Write the velocity to the fastSF arrays
+        for (int i = 0; i < Nx; ++i) {
+            for (int j = 0; j < Nz; ++j) {
+                V1_2D(i, j) = u[SYS_2D * (j * Nx + i) + 1];
+                V3_2D(i, j) = u[SYS_2D * (j * Nx + i) + 0];
+            }
         }
     }
 
@@ -1901,7 +2070,7 @@ void get_Inputs(int argc, char* argv[]) {
     
   
     int option;
-    while ((option=getopt(argc, argv, "X:Y:Z:1:2:x:y:z:l:d:p:t:s:U:V:W:Q:P:L:M:h:u:v:w:q:I:D:"))!=-1){
+    while ((option=getopt(argc, argv, "X:Y:Z:1:2:x:y:z:l:d:p:t:s:U:V:W:Q:P:L:M:h:u:v:w:q:I:D:c:"))!=-1){
             // printf("Option: %d\t Arg: %s\n", option, optarg);
     	switch(option){
     		case 'h':
@@ -1985,6 +2154,9 @@ void get_Inputs(int argc, char* argv[]) {
                 break;
             case 'D':
                 strncpy(data_dir, optarg, 512);
+                break;
+            case 'c':
+                checkpoint = std::stoi(optarg);
                 break;
             default:
                 if (rank_mpi==0){

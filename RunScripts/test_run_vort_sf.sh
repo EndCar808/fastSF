@@ -1,5 +1,5 @@
 # Set the number of MPI process to execute with
-num_run_procs=1
+num_run_procs=4
 
 # Executable
 execut="./src/fastSF.out"
@@ -14,7 +14,10 @@ dim="true"
 long_sf_switch="true"
 
 # Number of processors in the x direction
-procs_x=1
+procs_x=2
+
+# checkpoints
+chkpts=100
 
 # Dimensions
 Nx=64
@@ -42,6 +45,6 @@ perp_out_file="Vel_TransStrFunc_Data"
 long_out_file="Vel_LongStrFunc_Data"
 
 # Run command
-cmd="mpirun -np $num_run_procs $execut -s $scal_vec_switch -d $dim -l $long_sf_switch -p $procs_x -X $Nx -Y $Ny -Z $Nz -x $Lx -y $Ly -z $Lz -1 $q1 -2 $q2 -D $data_dir -I $input_file -M $scalar_out_file -P $perp_out_file -L $long_out_file"
+cmd="mpirun -np $num_run_procs $execut -c $chkpts -s $scal_vec_switch -d $dim -l $long_sf_switch -p $procs_x -X $Nx -Y $Ny -Z $Nz -x $Lx -y $Ly -z $Lz -1 $q1 -2 $q2 -D $data_dir -I $input_file -M $scalar_out_file -P $perp_out_file -L $long_out_file"
 echo -e "\n$cmd\n"
 $cmd
