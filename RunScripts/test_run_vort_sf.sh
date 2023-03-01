@@ -5,13 +5,13 @@ num_run_procs=4
 execut="./src/fastSF.out"
 
 # scalar/vector switch
-scal_vec_switch="true"
+scal_vec_switch="false"
 
 # 2D Dim switch
 dim="true"
 
 # Longitudinal sf only swithc
-long_sf_switch="true"
+long_sf_switch="false"
 
 # Number of processors in the x direction
 procs_x=2

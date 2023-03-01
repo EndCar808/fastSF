@@ -527,17 +527,20 @@ void computeStructureFunctions(int argc, char *argv[]) {
     //Get the input parameters
     get_Inputs(argc, argv);
 
+
     //Resize the structure function arrays according to the type of inputs
+    resize_input();
     resize_SFs();
     resizeSFTimeAvgArrays();
+    calculate_grid_spacing();
 
     // Initialize Compoud dataype 
     hid_t COMPLEX_DTYPE = createComplexDataType();
 
     // Allocate the memory needed to rread in data and perform transforms
     int Nzf = Nz/2 + 1;
+    tmp_w_hat = new complex<double>[Nx * Nzf];
     if (scalar_switch) {
-        tmp_w_hat = new complex<double>[Nx * Nzf];
         w = new double[Nx * Nz];
     }
     else {
@@ -594,8 +597,8 @@ void computeStructureFunctions(int argc, char *argv[]) {
     fftw_cleanup();
 
     // Free memory
+    delete tmp_w_hat;
     if (scalar_switch) {
-        delete tmp_w_hat;
         delete w;
     }
     else {
@@ -791,7 +794,9 @@ int getNumSnaps(char* infile) {
     // Open input file to read in the data
     hid_t file_id = H5Fopen(infile, H5F_ACC_RDONLY, H5P_DEFAULT);
 
-    printf("Checking Number of Snapshots ");
+    if (!rank_mpi) {
+        printf("Checking Number of Snapshots ");
+    }
     for(int i = 0; i < (int) 1e6; ++i) {
         // Check for snap
         sprintf(group_string, "/Iter_%05d", i); 
@@ -801,7 +806,9 @@ int getNumSnaps(char* infile) {
     }
 
     // Print total number of snaps to screen
-    printf("\nTotal Snapshots: %d\n\n", num_snaps);
+    if (!rank_mpi) {
+        printf("\nTotal Snapshots: %d\n\n", num_snaps);
+    }
 
     // Close file 
     H5Fclose(file_id);
@@ -836,7 +843,6 @@ void readInputData(int snap, char* infile, hid_t dtype) {
         fftw_execute_dft_c2r(scalar_inv_dft_2d, reinterpret_cast<fftw_complex*>(tmp_w_hat), w);
         
         // Write the real space data to the fastSF array - have to transpose it to be in same configuration as fastSF
-        T_2D.resize(Nx, Nz);
         for (int i = 0; i < Nx; ++i) {
             for (int j = 0; j < Nz; ++j) {
               T_2D(i, j) = w[j * Nx + i];
@@ -2562,7 +2568,7 @@ void SFunc_long_2D(
     Array<double,2> dUx;
     Array<double,2> dUpll;
     
-    for (int ix=0; ix<p_per_proc; ix++){
+    for (int ix=1; ix<p_per_proc; ix++){
         int x=index_list(ix, 0, rank_mpi);
         int z=index_list(ix, 1, rank_mpi);
         dUx.resize(Nx-x,Nz-z);
@@ -2575,7 +2581,7 @@ void SFunc_long_2D(
 
         dUx(Range::all(),Range::all())=Ux(Range(x,Nx-1),Range(z,Nz-1))-Ux(Range(0,Nx-x-1),Range(0,Nz-z-1));
         dUz(Range::all(),Range::all())=Uz(Range(x,Nx-1),Range(z,Nz-1))-Uz(Range(0,Nx-x-1),Range(0,Nz-z-1));
-            
+
         dUpll=(lx*dUx+lz*dUz)/r;
 
         for (int p=0; p<=q2-q1; p++){
