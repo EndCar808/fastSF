@@ -1,43 +1,43 @@
 # Set the number of MPI process to execute with
-num_run_procs=4
+num_run_procs=64
 
 # Executable
 execut="./src/fastSF.out"
 
 # scalar/vector switch
-scal_vec_switch="false"
-
-# Swtich to run my code -> set to false
-fast_code_switch="false"
+scal_vec_switch="true"
 
 # 2D Dim switch
 dim="true"
+
+# Switch to run my code -> set to false
+fast_code_switch="false"
 
 # Longitudinal sf only swithc
 long_sf_switch="false"
 
 # Number of processors in the x direction
-procs_x=2
+procs_x=8
 
 # checkpoints
-chkpts=100
+chkpts=10
 
 # Dimensions
-Nx=64
+Nx=1024
 Ny=1
-Nz=64 # this is Ny
+Nz=1024 # this is Ny
 
 # grid size
-Lx=1.0
+Lx=6.283185307179586477
 Ly=1.0
-Lz=1.0 # grid size in y direction
+Lz=6.283185307179586477 # grid size in y direction
 
 # Powers to compute
 q1=1
 q2=6
 
 # data directory
-data_dir="./test/MyTestData"
+data_dir="/root/2DNS/Data/SF/NAV_AB4CN_FULL_N[1024,1024]_T[0.0,0.00025,100.000]_NU[5e-20,1,4.0]_DRAG[0.1,0.1,1,0.0]_FORC[BODY_FORC_COS,2,1]_u0[RANDOM]_TAG[SFTest]/"
 
 # Path to input file - use the -I switch for this
 input_file="$data_dir/Main_HDF_Data.h5"

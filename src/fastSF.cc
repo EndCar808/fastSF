@@ -140,6 +140,7 @@ char data_dir[512];
 Array<double,3> vort_2d_sf_t_avg;
 Array<double,3> vel_2d_long_sf_t_avg;
 Array<double,3> vel_2d_trans_sf_t_avg;
+bool fast_code_switch = 1;
 
 /**
  ********************************************************************************************************************************************
@@ -506,16 +507,21 @@ int main(int argc, char *argv[]) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank_mpi);
     MPI_Comm_size(MPI_COMM_WORLD, &P);
     
-    
     //Initiallizing h5si
     h5::init();
+    
+    //Get the input parameters
+    get_Inputs(argc, argv);
+
 
     // Compute structure functions
-    computeStructureFunctions(argc, argv); 
-
-    // Run the fastSF original code
-    // fastSFcode(argc, argv);
-
+    if (!fast_code_switch) {
+        computeStructureFunctions(argc, argv); 
+    }
+    else {
+        // Run the fastSF original code
+        fastSFcode(argc, argv);
+    }
 
     h5::finalize();
     MPI_Finalize();
@@ -540,8 +546,6 @@ void computeStructureFunctions(int argc, char *argv[]) {
 
 
    
-    //Get the input parameters
-    get_Inputs(argc, argv);
 
 
     //Resize the structure function arrays according to the type of inputs
@@ -573,6 +577,7 @@ void computeStructureFunctions(int argc, char *argv[]) {
     int indx = 0;
     int save_snap = checkpoint;
     int num_snaps = getNumSnaps(Infilename);
+    printf("Here\n");
     for (int snap = 0; snap < num_snaps; ++snap)  {
 
         //Record the time of the start of the current iteration
@@ -831,6 +836,11 @@ int getNumSnaps(char* infile) {
 
     // Open input file to read in the data
     hid_t file_id = H5Fopen(infile, H5F_ACC_RDONLY, H5P_DEFAULT);
+    if (file_id < 0) {
+        printf("Unable To Open File to read the number of snapshots: [%s]\n", infile);
+        exit(1);
+    }
+
 
     if (!rank_mpi) {
         printf("Checking Number of Snapshots ");
@@ -866,6 +876,10 @@ void readInputData(int snap, char* infile, hid_t dtype) {
     if (!rank_mpi) {
         // Open input file to read in the data
         hid_t file_id = H5Fopen(infile, H5F_ACC_RDONLY, H5P_DEFAULT);
+        if (file_id < 0) {
+            printf("Unable To Open File: [%s]\n", infile);
+            exit(1);
+        }
 
         // Get groupname for this snap shot
         char dsetname[512]; 
@@ -873,10 +887,18 @@ void readInputData(int snap, char* infile, hid_t dtype) {
 
         // Get the dimensions of the dataset
         hsize_t dims[2];
-        H5LTget_dataset_info(file_id, dsetname, dims, NULL, NULL);
+        herr_t status = H5LTget_dataset_info(file_id, dsetname, dims, NULL, NULL);
+        if (status < 0) {
+            printf("Unable To Get Dataset Info from File: [%s]\n", infile);
+            exit(1);
+        }
 
         // Read in the data
-        H5LTread_dataset(file_id, dsetname, dtype, tmp_w_hat);
+        status = H5LTread_dataset(file_id, dsetname, dtype, tmp_w_hat);
+        if (status < 0) {
+            printf("Unable To Read dataset: [%s] from file: [%s]\n", dsetname, infile);
+            exit(1);
+        }
 
         if (scalar_switch) {
             // Execute inverse transform to real space
@@ -960,10 +982,8 @@ void fastSFcode(int argc, char *argv[]) {
 
     double elapsedt=0.0;
     double elapsepdt=0.0;
-    
+  
 
-   //Get the input parameters
-   get_Inputs(argc, argv);
    
    //Resizing the input fields
    Read_fields();
@@ -2128,7 +2148,7 @@ void get_Inputs(int argc, char* argv[]) {
     
   
     int option;
-    while ((option=getopt(argc, argv, "X:Y:Z:1:2:x:y:z:l:d:p:t:s:U:V:W:Q:P:L:M:h:u:v:w:q:I:D:c:"))!=-1){
+    while ((option=getopt(argc, argv, "X:Y:Z:1:2:x:y:z:l:d:p:t:s:U:V:W:Q:P:L:M:h:u:v:w:q:I:D:c:F:"))!=-1){
             // printf("Option: %d\t Arg: %s\n", option, optarg);
     	switch(option){
     		case 'h':
@@ -2167,6 +2187,9 @@ void get_Inputs(int argc, char* argv[]) {
     			break;
     		case 's':
     			scalar_switch=str_to_bool(optarg);
+    			break;
+    		case 'F':
+    			fast_code_switch=str_to_bool(optarg);
     			break;
     		case 'd':
     			two_dimension_switch=str_to_bool(optarg);
