@@ -524,6 +524,22 @@ int main(int argc, char *argv[]) {
 
 void computeStructureFunctions(int argc, char *argv[]) {
 
+    // Measures total execution time
+    timeval start_tot_t, end_tot_t;
+    // Measures time per iteration
+    timeval start_iter_t, end_iter_t;
+
+    //Record the time of starting of the program
+    gettimeofday(&start_tot_t,NULL);
+
+    double elapsed_tot_t=0.0;
+    double elapsed_iter_t=0.0;
+    double min_iter_t = 1e6; 
+    double max_iter_t = 0.0;
+    double avg_iter_t = 0.0;
+
+
+   
     //Get the input parameters
     get_Inputs(argc, argv);
 
@@ -558,10 +574,9 @@ void computeStructureFunctions(int argc, char *argv[]) {
     int save_snap = checkpoint;
     int num_snaps = getNumSnaps(Infilename);
     for (int snap = 0; snap < num_snaps; ++snap)  {
-        // Print snapshot update to screen
-        if (!rank_mpi) {
-            printf("Snap = %d\n", snap);
-        }
+
+        //Record the time of the start of the current iteration
+        gettimeofday(&start_iter_t,NULL);
 
         // Read in this snapshot
         readInputData(snap, Infilename, COMPLEX_DTYPE);
@@ -573,6 +588,18 @@ void computeStructureFunctions(int argc, char *argv[]) {
         if (snap % save_snap == 0) {
             writeSFToFile(snap);
             indx++;
+        }
+        
+
+        // Record the end time of the iteration
+        gettimeofday(&end_iter_t,NULL);
+        compute_time_elapsed(start_iter_t, end_iter_t, elapsed_iter_t);
+        avg_iter_t += elapsed_iter_t;
+        min_iter_t = fmin(min_iter_t, elapsed_iter_t);
+        max_iter_t = fmax(max_iter_t, elapsed_iter_t);
+        // Print snapshot update to screen
+        if (!rank_mpi) {
+            cout<<"Snap = "<<snap<<"\tTime:  "<<elapsed_iter_t<<endl;
         }
     }
     ///////////////////////
@@ -604,6 +631,17 @@ void computeStructureFunctions(int argc, char *argv[]) {
     else {
         delete tmp_u_hat;
         delete u;
+    }
+
+    //Record the time when the program ends
+    gettimeofday(&end_tot_t,NULL);
+    
+    compute_time_elapsed(start_tot_t, end_tot_t, elapsed_tot_t);
+     if (rank_mpi==0) {
+         cout<<"\n\nNx: "<<Nx<<"\nNy: "<<Ny<<"\nNz: "<<Nz<<"\nNum Procs: "<<P<<"\nProcs in X direction: "<<px<<endl;
+         cout<<"\nMin Iter Time: "<<min_iter_t<<"(s)"<<"\nMax Iter Time: "<<max_iter_t<<"(s)"<<"\nAvg Iter Time: "<<avg_iter_t/num_snaps<<"(s)"<<endl;
+         cout<<"\n\nTotal time elapsed: "<<elapsed_tot_t<<"(s)"<<endl;
+         cout<<"\nProgram ends."<<endl;
     }
 }
 
@@ -824,73 +862,87 @@ int getNumSnaps(char* infile) {
 */
 void readInputData(int snap, char* infile, hid_t dtype) {
 
-    // Open input file to read in the data
-    hid_t file_id = H5Fopen(infile, H5F_ACC_RDONLY, H5P_DEFAULT);
+    // Read in data on master rank
+    if (!rank_mpi) {
+        // Open input file to read in the data
+        hid_t file_id = H5Fopen(infile, H5F_ACC_RDONLY, H5P_DEFAULT);
 
-    // Get groupname for this snap shot
-    char dsetname[512]; 
-    sprintf(dsetname, "Iter_%05d/w_hat", snap);
+        // Get groupname for this snap shot
+        char dsetname[512]; 
+        sprintf(dsetname, "Iter_%05d/w_hat", snap);
 
-    // Get the dimensions of the dataset
-    hsize_t dims[2];
-    H5LTget_dataset_info(file_id, dsetname, dims, NULL, NULL);
+        // Get the dimensions of the dataset
+        hsize_t dims[2];
+        H5LTget_dataset_info(file_id, dsetname, dims, NULL, NULL);
 
-    // Read in the data
-    H5LTread_dataset(file_id, dsetname, dtype, tmp_w_hat);
+        // Read in the data
+        H5LTread_dataset(file_id, dsetname, dtype, tmp_w_hat);
 
-    if (scalar_switch) {
-        // Execute inverse transform to real space
-        fftw_execute_dft_c2r(scalar_inv_dft_2d, reinterpret_cast<fftw_complex*>(tmp_w_hat), w);
-        
-        // Write the real space data to the fastSF array - have to transpose it to be in same configuration as fastSF
-        for (int i = 0; i < Nx; ++i) {
-            for (int j = 0; j < Nz; ++j) {
-              T_2D(i, j) = w[j * Nx + i];
+        if (scalar_switch) {
+            // Execute inverse transform to real space
+            fftw_execute_dft_c2r(scalar_inv_dft_2d, reinterpret_cast<fftw_complex*>(tmp_w_hat), w);
+            
+            // Write the real space data to the fastSF array - have to transpose it to be in same configuration as fastSF
+            for (int i = 0; i < Nx; ++i) {
+                for (int j = 0; j < Nz; ++j) {
+                  T_2D(i, j) = w[j * Nx + i];
+                }
             }
         }
+        else {
+            // Get the velocity from the vorticity in Fourier space
+            int Nzf = Nx/2 + 1;
+            complex<double> kx, kz;
+            complex<double> k_sqr;
+            complex<double> I(0.0, 1.0);
+            for (int i = 0; i < Nx; ++i) {
+                for (int j = 0; j < Nzf; ++j) {
+                    if (i <= Nx / 2) {
+                        kx = (double)i + 0.0 * I;
+                    }
+                    else {
+                        kx = (double)-Nx + i + 0.0 * I;
+                    }
+                    kz = (double)j + 0.0 * I;
+
+                    if (real(kx) == 0.0 && real(kz) == 0.0) {
+                        tmp_u_hat[SYS_2D * (i * Nzf + j) + 0] = 0.0 + 0.0 * I;
+                        tmp_u_hat[SYS_2D * (i * Nzf + j) + 1] = 0.0 + 0.0 * I;
+                    } 
+                    else {
+                        k_sqr = (kx * kx + kz * kz);
+                        tmp_u_hat[SYS_2D * (i * Nzf + j) + 0] = I * (1.0 / k_sqr) * (kz * tmp_w_hat[i * Nzf + j]);
+                        tmp_u_hat[SYS_2D * (i * Nzf + j) + 1] = I * (-1.0 / k_sqr) * (kx * tmp_w_hat[i * Nzf + j]);  
+                    }
+                }
+            }
+
+            // Execute inverse transform to real space
+            fftw_execute_dft_c2r(vector_inv_dft_2d, reinterpret_cast<fftw_complex*>(tmp_u_hat), u);
+
+            // Write the velocity to the fastSF arrays
+            for (int i = 0; i < Nx; ++i) {
+                for (int j = 0; j < Nz; ++j) {
+                    V1_2D(i, j) = u[SYS_2D * (j * Nx + i) + 1];
+                    V3_2D(i, j) = u[SYS_2D * (j * Nx + i) + 0];
+                }
+            }
+        }
+
+        // Close file 
+        H5Fclose(file_id);
+    }    
+
+    // Broadcast the input data to all procs
+    if (scalar_switch) {
+        // Broadcast vorticity data
+        MPI_Bcast(T_2D.data(), Nx * Nz, MPI_DOUBLE, 0, MPI_COMM_WORLD);
     }
     else {
-        // Get the velocity from the vorticity in Fourier space
-        int Nzf = Nx/2 + 1;
-        complex<double> kx, kz;
-        complex<double> k_sqr;
-        complex<double> I(0.0, 1.0);
-        for (int i = 0; i < Nx; ++i) {
-            for (int j = 0; j < Nzf; ++j) {
-                if (i <= Nx / 2) {
-                    kx = (double)i + 0.0 * I;
-                }
-                else {
-                    kx = (double)-Nx + i + 0.0 * I;
-                }
-                kz = (double)j + 0.0 * I;
-
-                if (real(kx) == 0.0 && real(kz) == 0.0) {
-                    tmp_u_hat[SYS_2D * (i * Nzf + j) + 0] = 0.0 + 0.0 * I;
-                    tmp_u_hat[SYS_2D * (i * Nzf + j) + 1] = 0.0 + 0.0 * I;
-                } 
-                else {
-                    k_sqr = (kx * kx + kz * kz);
-                    tmp_u_hat[SYS_2D * (i * Nzf + j) + 0] = I * (1.0 / k_sqr) * (kz * tmp_w_hat[i * Nzf + j]);
-                    tmp_u_hat[SYS_2D * (i * Nzf + j) + 1] = I * (-1.0 / k_sqr) * (kx * tmp_w_hat[i * Nzf + j]);  
-                }
-            }
-        }
-
-        // Execute inverse transform to real space
-        fftw_execute_dft_c2r(vector_inv_dft_2d, reinterpret_cast<fftw_complex*>(tmp_u_hat), u);
-
-        // Write the velocity to the fastSF arrays
-        for (int i = 0; i < Nx; ++i) {
-            for (int j = 0; j < Nz; ++j) {
-                V1_2D(i, j) = u[SYS_2D * (j * Nx + i) + 1];
-                V3_2D(i, j) = u[SYS_2D * (j * Nx + i) + 0];
-            }
-        }
+        // Broadcast velocity data
+        MPI_Bcast(V1_2D.data(), Nx * Nz, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        MPI_Bcast(V3_2D.data(), Nx * Nz, MPI_DOUBLE, 0, MPI_COMM_WORLD);
     }
-
-    // Close file 
-    H5Fclose(file_id);
 }
 
 /**
